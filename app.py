@@ -2,11 +2,12 @@ from flask import Flask, request, jsonify
 import base64
 import os
 import json
+import re
 from groq import Groq
 
 app = Flask(__name__)
 
-# Groq API key will be stored in an environment variable on Render
+# Load API key from Render environment variable
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -20,18 +21,19 @@ def analyze():
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
+        # Prompt for nutrition analysis
         prompt = """
         You are a professional nutrition analyst.
-        Look at the meal in the image and respond with STRICT JSON:
+        Look at the meal image and respond with STRICT JSON ONLY:
         {
           "food": "...",
           "serving": "amount + unit (e.g. 150 g, 1 slice, 1 bowl)",
           "calories": <integer>,
-          "protein": <integer>,   // grams
-          "carbs": <integer>,     // grams
-          "fat": <integer>        // grams
+          "protein": <integer>,
+          "carbs": <integer>,
+          "fat": <integer>
         }
-        Do not include any other text, just valid JSON.
+        Do NOT add explanations, notes, markdown, or text outside JSON.
         """
 
         response = client.chat.completions.create(
@@ -43,7 +45,7 @@ def analyze():
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "Analyze this meal and return only JSON."
+                            "text": "Analyze this meal and return ONLY JSON."
                         },
                         {
                             "type": "input_image",
@@ -55,30 +57,38 @@ def analyze():
             temperature=0.2,
         )
 
+        # AI response text
         ai_text = response.choices[0].message.content
 
-import re
+        # -------------------------------------------------------------------
+        # SAFE JSON EXTRACTION (fixes invalid JSON issues)
+        # -------------------------------------------------------------------
 
-# Extract JSON from AI response (even if extra text exists)
-json_match = re.search(r'\{.*\}', ai_text, re.DOTALL)
+        # Find JSON { ... } inside text
+        json_match = re.search(r'\{.*\}', ai_text, re.DOTALL)
 
-if not json_match:
-    return jsonify({
-        "error": "AI returned no JSON",
-        "raw": ai_text
-    }), 500
+        if not json_match:
+            return jsonify({
+                "error": "AI returned no JSON",
+                "raw": ai_text
+            }), 500
 
-clean_json = json_match.group(0)
+        clean_json = json_match.group(0)
 
-try:
-    ai_json = json.loads(clean_json)
-except Exception:
-    return jsonify({
-        "error": "AI JSON parse error",
-        "raw": ai_text
-    }), 500
+        try:
+            ai_json = json.loads(clean_json)
+        except Exception:
+            return jsonify({
+                "error": "AI JSON parse error",
+                "raw": ai_text
+            }), 500
 
-return jsonify(ai_json)
+        return jsonify(ai_json)
+
+        # -------------------------------------------------------------------
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/", methods=["GET"])
@@ -88,4 +98,3 @@ def root():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
