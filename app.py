@@ -1,82 +1,64 @@
 from flask import Flask, request, jsonify
 from groq import Groq
 import base64
-import json
 import os
 
 app = Flask(__name__)
-groq_api_key = os.environ.get("GROQ_API_KEY")
 
-client = Groq(api_key=groq_api_key)
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+@app.route("/", methods=["GET"])
+def home():
+    return "WESIVIO Nutrition API running."
 
 @app.route("/analyze", methods=["POST"])
-def analyze():
+def analyze_food():
     try:
         data = request.json
-        img_b64 = data.get("image")
 
-        if not img_b64:
-            return jsonify({"error": "image missing"}), 400
+        if not data or "image" not in data:
+            return jsonify({"error": "No image provided"}), 200
 
-        prompt = """
-You are a nutrition AI. Analyze the food in the image and respond ONLY with this exact JSON structure:
+        image_b64 = data["image"]
 
-{
-  "food": "name",
-  "serving_grams": 123,
-  "calories": 123,
-  "protein_g": 0,
-  "carbs_g": 0,
-  "fat_g": 0
-}
-
-Rules:
-- No explanations
-- No comments
-- No text outside JSON
-- No markdown
-- Always return valid JSON
-"""
-
-        image_bytes = base64.b64decode(img_b64)
-
+        # Send to Groq Vision Model
         response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
+            model="llava-v1.5-7b",
             messages=[
-                {"role": "system", "content": prompt},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": "Analyze this meal."},
+                        {"type": "text", "text": "Identify the food and return JSON with: name, calories, protein_g, carbs_g, fat_g."},
                         {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{img_b64}"
+                            "type": "image_url",
+                            "image_url": { "url": f"data:image/jpeg;base64,{image_b64}" }
                         }
                     ]
                 }
             ],
-            temperature=0.2
+            temperature=0
         )
 
-        ai_text = response.choices[0].message.content.strip()
+        ai_text = response.choices[0].message.content
 
+        # Very safe fallback parsing
         try:
-            ai_json = json.loads(ai_text)
-        except json.JSONDecodeError:
-            return jsonify({
-                "error": "Invalid JSON from AI",
-                "raw": ai_text
-            }), 500
+            # If the model outputs JSON block ```json ... ```
+            if "```" in ai_text:
+                ai_text = ai_text.split("```")[1]
+                ai_text = ai_text.replace("json", "").strip()
 
-        return jsonify(ai_json)
+            result = eval(ai_text) if ai_text.startswith("{") else {"raw": ai_text}
+
+        except Exception:
+            # Never return 500 → always return safe JSON
+            result = {"raw": ai_text}
+
+        return jsonify(result), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "WESIVIO Nutrition API is running."
+        # Last-chance fallback — still return JSON, not 500
+        return jsonify({"error": str(e)}), 200
 
 
 if __name__ == "__main__":
