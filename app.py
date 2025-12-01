@@ -1,53 +1,36 @@
-from flask import Flask, request, jsonify
-import base64
-import os
-from groq import Groq
-
-# Create Flask app FIRST
-app = Flask(__name__)
-
-# Load API key
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-
-@app.route("/", methods=["GET"])
-def root():
-    return "WESIVIO Nutrition API is running."
-
-
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
-        print("====== NEW REQUEST RECEIVED ======")
+        print("\n========== NEW REQUEST ==========")
 
         data = request.get_json()
-        print("Incoming JSON:", data)
+        print("Received JSON:", data)
 
         if not data or "image" not in data:
-            print("ERROR: No image in request")
+            print("ERROR: Missing image")
             return jsonify({"error": "No image provided"}), 400
 
         # Decode base64
         try:
             image_bytes = base64.b64decode(data["image"])
-            print("Image decoded OK. Size:", len(image_bytes))
+            print("Image decoded OK. Bytes:", len(image_bytes))
         except Exception as e:
-            print("ERROR decoding image:", e)
-            return jsonify({"error": "Image decode failed"}), 400
+            print("Decode ERROR:", e)
+            return jsonify({"error": "Image decode failed", "details": str(e)}), 400
 
-        # ===================================================================
-        #  SEND REQUEST TO GROQ
-        # ===================================================================
+        # ------------------------------
+        #  GROQ REQUEST
+        # ------------------------------
+        print("Sending to Groq...")
+
         try:
-            print("Sending request to Groq…")
-
             response = client.chat.completions.create(
                 model="llama-3.2-90b-vision-preview",
                 messages=[
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Identify the food and estimate calories."},
+                            {"type": "text", "text": "Identify food and estimate calories."},
                             {"type": "input_image",
                              "image_url": "data:image/jpeg;base64," + data["image"]}
                         ]
@@ -56,21 +39,20 @@ def analyze():
                 max_tokens=300
             )
 
-            print("Groq responded OK")
+            print("Groq response OK")
             print("Groq RAW:", response)
 
             result = response.choices[0].message.content
             return jsonify({"result": result})
 
         except Exception as e:
-            print("GROQ ERROR:", e)
-            return jsonify({"error": "Groq failed", "details": str(e)}), 500
+            print("GROQ ERROR (full):")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Groq failure", "details": str(e)}), 500
 
     except Exception as e:
-        print("BIG SERVER ERROR:", e)
+        print("SERVER ERROR (full):")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Server crashed", "details": str(e)}), 500
-
-
-# Start server locally
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
