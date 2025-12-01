@@ -1,3 +1,20 @@
+from flask import Flask, request, jsonify
+import base64
+import os
+from groq import Groq
+
+# Create Flask app FIRST
+app = Flask(__name__)
+
+# Load API key
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+
+@app.route("/", methods=["GET"])
+def root():
+    return "WESIVIO Nutrition API is running."
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -10,7 +27,7 @@ def analyze():
             print("ERROR: No image in request")
             return jsonify({"error": "No image provided"}), 400
 
-        # Decode image
+        # Decode base64
         try:
             image_bytes = base64.b64decode(data["image"])
             print("Image decoded OK. Size:", len(image_bytes))
@@ -18,9 +35,9 @@ def analyze():
             print("ERROR decoding image:", e)
             return jsonify({"error": "Image decode failed"}), 400
 
-        # ======================
-        # CALL GROQ
-        # ======================
+        # ===================================================================
+        #  SEND REQUEST TO GROQ
+        # ===================================================================
         try:
             print("Sending request to Groq…")
 
@@ -30,8 +47,9 @@ def analyze():
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Identify the food and estimate its calories."},
-                            {"type": "input_image", "image_url": "data:image/jpeg;base64," + data["image"]}
+                            {"type": "text", "text": "Identify the food and estimate calories."},
+                            {"type": "input_image",
+                             "image_url": "data:image/jpeg;base64," + data["image"]}
                         ]
                     }
                 ],
@@ -45,9 +63,14 @@ def analyze():
             return jsonify({"result": result})
 
         except Exception as e:
-            print("GROQ ERROR:", str(e))
+            print("GROQ ERROR:", e)
             return jsonify({"error": "Groq failed", "details": str(e)}), 500
 
     except Exception as e:
-        print("BIG SERVER ERROR:", str(e))
+        print("BIG SERVER ERROR:", e)
         return jsonify({"error": "Server crashed", "details": str(e)}), 500
+
+
+# Start server locally
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
