@@ -57,15 +57,28 @@ def analyze():
 
         ai_text = response.choices[0].message.content
 
-        # Try to parse the text response as JSON
-        ai_json = json.loads(ai_text)
+import re
 
-        return jsonify(ai_json)
+# Extract JSON from AI response (even if extra text exists)
+json_match = re.search(r'\{.*\}', ai_text, re.DOTALL)
 
-    except json.JSONDecodeError:
-        return jsonify({"error": "AI response was not valid JSON", "raw": ai_text}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+if not json_match:
+    return jsonify({
+        "error": "AI returned no JSON",
+        "raw": ai_text
+    }), 500
+
+clean_json = json_match.group(0)
+
+try:
+    ai_json = json.loads(clean_json)
+except Exception:
+    return jsonify({
+        "error": "AI JSON parse error",
+        "raw": ai_text
+    }), 500
+
+return jsonify(ai_json)
 
 
 @app.route("/", methods=["GET"])
@@ -75,3 +88,4 @@ def root():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
