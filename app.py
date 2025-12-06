@@ -2,29 +2,29 @@ from flask import Flask, request, jsonify
 import os
 import json
 import re
-from groq import Groq
-from werkzeug.security import generate_password_hash, check_password_hash
 import uuid
+from werkzeug.security import generate_password_hash, check_password_hash
+from groq import Groq
 
 app = Flask(__name__)
 
-# ----------------------------------------------------------
+# ------------------------------------
 # LOAD GROQ API KEY
-# ----------------------------------------------------------
+# ------------------------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-# ----------------------------------------------------------
-# 🔥 WARM-UP ENDPOINT (USED BY FLUTTER TO WAKE RENDER)
-# ----------------------------------------------------------
+# ------------------------------------
+# 🔥 WAKE-UP PING ENDPOINT
+# ------------------------------------
 @app.route("/ping", methods=["GET"])
 def ping():
     return {"status": "alive"}, 200
 
 
-# ----------------------------------------------------------
+# ------------------------------------
 # BARCODE DATABASE
-# ----------------------------------------------------------
+# ------------------------------------
 BARCODE_DB = {
     "5000112637922": {
         "food": "Coke Zero (330ml)",
@@ -45,9 +45,6 @@ BARCODE_DB = {
 }
 
 
-# ----------------------------------------------------------
-# BARCODE LOOKUP
-# ----------------------------------------------------------
 @app.route("/barcode", methods=["POST"])
 def barcode_lookup():
     data = request.get_json(force=True)
@@ -62,9 +59,9 @@ def barcode_lookup():
     return jsonify({"item": BARCODE_DB[barcode]})
 
 
-# ----------------------------------------------------------
+# ------------------------------------
 # MEAL ANALYSIS ENDPOINT
-# ----------------------------------------------------------
+# ------------------------------------
 @app.route("/analyze", methods=["POST"])
 def analyze_image():
     try:
@@ -74,26 +71,15 @@ def analyze_image():
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
-        # SYSTEM PROMPT
         system_prompt = """
         You are a professional nutrition analyst.
 
-        If the image shows a MEAL:
-        Identify all major foods (2–5 items) and respond in EXACTLY this format:
-
-        food1 | serving g/ml | calories | protein | carbs | fat
-        food2 | serving g/ml | calories | protein | carbs | fat
-        food3 | serving g/ml | calories | protein | carbs | fat
+        Respond in EXACTLY this format:
+        food | serving g/ml | calories | protein | carbs | fat
+        ...
         TOTAL | total g/ml | total_cal | total_protein | total_carbs | total_fat
-
-        RULES:
-        - ALWAYS estimate serving size.
-        - ALWAYS include TOTAL line.
-        - NEVER return explanation, markdown or notes.
-        - Values must be integers.
         """
 
-        # SEND TO GROQ
         completion = client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[
@@ -101,7 +87,7 @@ def analyze_image():
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this meal. Follow formatting strictly."},
+                        {"type": "text", "text": "Analyze this meal."},
                         {"type": "image_url", "image_url": {
                             "url": f"data:image/jpeg;base64,{image_b64}"
                         }},
@@ -113,10 +99,6 @@ def analyze_image():
         )
 
         ai_text = completion.choices[0].message.content.strip()
-
-        # ----------------------------------------------------------
-        # PARSE MULTI-LINE FORMAT
-        # ----------------------------------------------------------
         lines = [l.strip() for l in ai_text.split("\n") if "|" in l]
 
         items = []
@@ -132,14 +114,13 @@ def analyze_image():
                 continue
 
             food, serving, cal, prot, carb, fat = parts
-
             entry = {
                 "food": food,
                 "serving": serving,
                 "calories": to_int(cal),
                 "protein": to_int(prot),
                 "carbs": to_int(carb),
-                "fat": to_int(fat),
+                "fat": to_int(fat)
             }
 
             if food.lower() == "total":
@@ -157,17 +138,35 @@ def analyze_image():
         return jsonify({"error": str(e)}), 500
 
 
-# ----------------------------------------------------------
-# HOME ENDPOINT
-# ----------------------------------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "WESIVIO Nutrition API (multi-meal + barcode + auth) running."
+# ------------------------------------
+# SAVE MEAL ONLINE
+# ------------------------------------
+@app.route("/save_meal", methods=["POST"])
+def save_meal():
+    data = request.json
+    user_id = data.get("user_id")
+    items = data.get("items")
+    total = data.get("total")
+    timestamp = data.get("timestamp")
 
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
 
-# ----------------------------------------------------------
-# USER AUTHENTICATION SYSTEM
-# ----------------------------------------------------------
+    record = {
+        "user_id": user_id,
+        "items": items,
+        "total": total,
+        "timestamp": timestamp
+    }
+
+    with open("meals.json", "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    return jsonify({"status": "ok"})
+
+# ------------------------------------
+# USER AUTH
+# ------------------------------------
 USERS_FILE = "users.json"
 
 def load_users():
@@ -180,15 +179,11 @@ def save_users(data):
     with open(USERS_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-
 @app.route("/register", methods=["POST"])
 def register():
     data = request.json
     email = data.get("email")
     password = data.get("password")
-
-    if not email or not password:
-        return jsonify({"error": "Missing email or password"}), 400
 
     users = load_users()
 
@@ -198,11 +193,7 @@ def register():
     user_id = str(uuid.uuid4())
     hashed_pw = generate_password_hash(password)
 
-    users[email] = {
-        "user_id": user_id,
-        "password": hashed_pw
-    }
-
+    users[email] = {"user_id": user_id, "password": hashed_pw}
     save_users(users)
 
     return jsonify({"status": "ok", "user_id": user_id})
@@ -227,8 +218,10 @@ def login_user():
     return jsonify({"status": "ok", "user_id": user_record["user_id"]})
 
 
-# ----------------------------------------------------------
-# FLASK DEV SERVER
-# ----------------------------------------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return "WESIVIO API running."
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
