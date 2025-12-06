@@ -156,6 +156,70 @@ def analyze_image():
 def home():
     return "WESIVIO Nutrition API (multi-meal + barcode) is running."
 
+# ---------------------------
+# USER AUTHENTICATION SYSTEM
+# ---------------------------
+from werkzeug.security import generate_password_hash, check_password_hash
+import uuid
+
+USERS_FILE = "users.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_users(data):
+    with open(USERS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.json
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
+
+    users = load_users()
+
+    if email in users:
+        return jsonify({"error": "Email already exists"}), 400
+
+    user_id = str(uuid.uuid4())
+    hashed_pw = generate_password_hash(password)
+
+    users[email] = {
+        "user_id": user_id,
+        "password": hashed_pw
+    }
+
+    save_users(users)
+
+    return jsonify({"status": "ok", "user_id": user_id})
+
+
+@app.route("/login", methods=["POST"])
+def login_user():
+    data = request.json
+    email = data.get("email")
+    password = data.get("password")
+
+    users = load_users()
+
+    if email not in users:
+        return jsonify({"error": "User not found"}), 400
+
+    user_record = users[email]
+
+    if not check_password_hash(user_record["password"], password):
+        return jsonify({"error": "Incorrect password"}), 400
+
+    return jsonify({"status": "ok", "user_id": user_record["user_id"]})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
