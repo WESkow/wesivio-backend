@@ -3,19 +3,30 @@ import os
 import json
 import re
 from groq import Groq
+from werkzeug.security import generate_password_hash, check_password_hash
+import uuid
 
 app = Flask(__name__)
 
-# Load API key from environment
+# ----------------------------------------------------------
+# LOAD GROQ API KEY
+# ----------------------------------------------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
+# ----------------------------------------------------------
+# 🔥 WARM-UP ENDPOINT (USED BY FLUTTER TO WAKE RENDER)
+# ----------------------------------------------------------
+@app.route("/ping", methods=["GET"])
+def ping():
+    return {"status": "alive"}, 200
+
 
 # ----------------------------------------------------------
-# BARCODE DATABASE (add more as you test items)
+# BARCODE DATABASE
 # ----------------------------------------------------------
 BARCODE_DB = {
-    "5000112637922": {  # Example: Coca-Cola Zero can 330ml
+    "5000112637922": {
         "food": "Coke Zero (330ml)",
         "serving": "330 ml",
         "calories": 1,
@@ -23,7 +34,7 @@ BARCODE_DB = {
         "carbs": 0,
         "fat": 0
     },
-    "5000159484695": {  # Example barcodes
+    "5000159484695": {
         "food": "Monster Ultra (Sugar Free 500ml)",
         "serving": "500 ml",
         "calories": 10,
@@ -34,6 +45,9 @@ BARCODE_DB = {
 }
 
 
+# ----------------------------------------------------------
+# BARCODE LOOKUP
+# ----------------------------------------------------------
 @app.route("/barcode", methods=["POST"])
 def barcode_lookup():
     data = request.get_json(force=True)
@@ -60,9 +74,7 @@ def analyze_image():
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
-        # ----------------------------------------------------------
-        # SYSTEM PROMPT FOR MEAL DETECTION (multi-item)
-        # ----------------------------------------------------------
+        # SYSTEM PROMPT
         system_prompt = """
         You are a professional nutrition analyst.
 
@@ -75,17 +87,10 @@ def analyze_image():
         TOTAL | total g/ml | total_cal | total_protein | total_carbs | total_fat
 
         RULES:
-        - ALWAYS estimate serving size (NEVER leave blank).
+        - ALWAYS estimate serving size.
         - ALWAYS include TOTAL line.
-        - NEVER return explanation, markdown, or text outside the lines.
-        - Round all nutrition values to full integers.
-
-        Serving estimation hints:
-        - Protein/meat: 80–200 g
-        - Carbs (rice/pasta): 100–250 g
-        - Vegetables: 50–150 g
-        - Sauces: 10–40 g
-        - Mixed plates: estimate each component separately
+        - NEVER return explanation, markdown or notes.
+        - Values must be integers.
         """
 
         # SEND TO GROQ
@@ -117,16 +122,16 @@ def analyze_image():
         items = []
         total_obj = None
 
+        def to_int(t):
+            m = re.search(r"-?\\d+", t)
+            return int(m.group(0)) if m else 0
+
         for line in lines:
             parts = [p.strip() for p in line.split("|")]
             if len(parts) != 6:
                 continue
 
             food, serving, cal, prot, carb, fat = parts
-
-            def to_int(t):
-                m = re.search(r"-?\d+", t)
-                return int(m.group(0)) if m else 0
 
             entry = {
                 "food": food,
@@ -152,16 +157,17 @@ def analyze_image():
         return jsonify({"error": str(e)}), 500
 
 
+# ----------------------------------------------------------
+# HOME ENDPOINT
+# ----------------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
-    return "WESIVIO Nutrition API (multi-meal + barcode) is running."
+    return "WESIVIO Nutrition API (multi-meal + barcode + auth) running."
 
-# ---------------------------
+
+# ----------------------------------------------------------
 # USER AUTHENTICATION SYSTEM
-# ---------------------------
-from werkzeug.security import generate_password_hash, check_password_hash
-import uuid
-
+# ----------------------------------------------------------
 USERS_FILE = "users.json"
 
 def load_users():
@@ -173,6 +179,7 @@ def load_users():
 def save_users(data):
     with open(USERS_FILE, "w") as f:
         json.dump(data, f, indent=4)
+
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -220,6 +227,8 @@ def login_user():
     return jsonify({"status": "ok", "user_id": user_record["user_id"]})
 
 
+# ----------------------------------------------------------
+# FLASK DEV SERVER
+# ----------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
