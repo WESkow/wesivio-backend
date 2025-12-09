@@ -3,20 +3,20 @@ import os
 import json
 import re
 import uuid
+import base64
 from werkzeug.security import generate_password_hash, check_password_hash
 from groq import Groq
 
 app = Flask(__name__)
 
 # ------------------------------------
-# LOAD GROQ API KEY
+# GROQ CLIENT
 # ------------------------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-
 # ------------------------------------
-# 🔥 WAKE-UP PING ENDPOINT
+# PING
 # ------------------------------------
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -24,51 +24,43 @@ def ping():
 
 
 # ------------------------------------
-# BARCODE DATABASE
-# wartości są NA PORCJĘ
+# BARCODE DB
 # ------------------------------------
 BARCODE_DB = {
     "5000112637922": {
         "name": "Coke Zero (330ml)",
-        "serving": "330 ml",
         "grams": 330,
-        "calories": 1,
-        "protein": 0,
-        "carbs": 0,
-        "fat": 0,
+        "nutrition": {
+            "calories": 1,
+            "protein": 0,
+            "carbs": 0,
+            "fat": 0,
+        },
     },
     "5000159484695": {
-        "name": "Monster Ultra (Sugar Free 500ml)",
-        "serving": "500 ml",
+        "name": "Monster Ultra (sugar-free 500ml)",
         "grams": 500,
-        "calories": 10,
-        "protein": 0,
-        "carbs": 2,
-        "fat": 0,
+        "nutrition": {
+            "calories": 10,
+            "protein": 0,
+            "carbs": 2,
+            "fat": 0,
+        },
     },
 }
 
 
-def parse_int_from_str(text, default=100):
-    if not text:
-        return default
-    m = re.search(r"\d+", str(text))
-    if not m:
-        return default
-    try:
-        return int(m.group(0))
-    except ValueError:
-        return default
-
-
 @app.route("/barcode", methods=["GET", "POST"])
 def barcode_lookup():
-    # Obsługujemy GET ?code=... albo POST {"barcode": "..."}
+    """
+    GET  /barcode?code=123
+    POST /barcode  { "barcode": "123" }
+    """
     code = None
     if request.method == "GET":
-        code = request.args.get("code") or request.args.get("barcode")
+        code = request.args.get("code")
     else:
-        data = request.get_json(force=True, silent=True) or {}
+        data = request.get_json(force=True) or {}
         code = data.get("barcode") or data.get("code")
 
     if not code:
@@ -78,212 +70,131 @@ def barcode_lookup():
     if not item:
         return jsonify({"error": "Barcode not found"}), 404
 
-    grams = item.get("grams") or parse_int_from_str(item.get("serving"), 100)
+    return jsonify({
+        "code": code,
+        "name": item["name"],
+        "grams": item.get("grams", 100),
+        "item": item,
+    })
 
-    # Makra NA PORCJĘ – aplikacja przyjmie je jako "już przeliczone"
-    nutrition = {
-        "calories": item.get("calories", 0),
-        "protein": item.get("protein", 0),
-        "carbs": item.get("carbs", 0),
-        "fat": item.get("fat", 0),
-        # reszta mikro = 0
-        "fiber": 0,
-        "sugars": 0,
-        "vitamin_a": 0,
-        "vitamin_c": 0,
-        "vitamin_k": 0,
-        "vitamin_e": 0,
-        "vitamin_b6": 0,
-        "omega3": 0,
-        "sodium": 0,
-        "potassium": 0,
-        "iron": 0,
-        "calcium": 0,
-        "magnesium": 0,
-    }
 
-    return jsonify(
-        {
-            "name": item["name"],
-            "grams": grams,
-            "nutrition": nutrition,
-        }
+# ------------------------------------
+# MEAL ANALYSIS (IMAGE -> AI)
+# ------------------------------------
+SYSTEM_PROMPT = """
+You are a professional nutrition analyst.
+
+You receive a photo of a meal. Detect ALL food items you can
+and estimate their nutrition.
+
+Respond in EXACTLY this table-like format, one line per item:
+
+food | serving g/ml | calories | protein | carbs | fat
+...
+
+Then last line must be:
+
+TOTAL | total g/ml | total_cal | total_protein | total_carbs | total_fat
+"""
+
+
+def _to_int(text: str) -> int:
+    m = re.search(r"-?\d+", text)
+    return int(m.group(0)) if m else 0
+
+
+def _extract_grams(serving: str) -> int:
+    """
+    Try to extract grams/ml from 'serving g/ml' column.
+    If nothing found -> 100.
+    """
+    m = re.search(r"(\d+)\s*(g|gram|grams|ml|milliliters?)", serving, re.I)
+    if not m:
+        return 100
+    return int(m.group(1))
+
+
+def _analyze_image_from_b64(image_b64: str):
+    completion = client.chat.completions.create(
+        model="llama-3.2-vision-11b",   # 🔥 multi-item vision model
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Analyze this meal."},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_b64}"
+                    }},
+                ],
+            },
+        ],
+        temperature=0.1,
+        max_completion_tokens=512,
     )
 
+    ai_text = completion.choices[0].message.content.strip()
+    lines = [l.strip() for l in ai_text.split("\n") if "|" in l]
 
-# ------------------------------------
-# MEAL ANALYSIS (WIELE PRODUKTÓW)
-# – zostawiamy jako "pełny raport"
-# ------------------------------------
-@app.route("/analyze", methods=["POST"])
-def analyze_image():
-    try:
-        data = request.get_json(force=True)
-        image_b64 = data.get("image")
+    items = []
+    total_obj = None
 
-        if not image_b64:
-            return jsonify({"error": "No image provided"}), 400
-
-        system_prompt = """
-        You are a professional nutrition analyst.
-
-        Identify ALL visible food items on the plate (up to 6 different items).
-
-        Respond in EXACTLY this line-based format (no extra text):
-
-        food | serving g/ml | calories | protein | carbs | fat
-        ...
-        TOTAL | total g/ml | total_cal | total_protein | total_carbs | total_fat
-        """
-
-        completion = client.chat.completions.create(
-    model="llama-3.2-vision-11b",
-    messages=[
-        {"role":"system", "content": system_prompt},
-        {
-            "role":"user",
-            "content": [
-                {"type": "text", "text": "Analyze this meal."},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/jpeg;base64,{image_b64}"
-                }},
-            ]
-        }
-    ],
-    temperature=0.1,
-)
-
-
-        ai_text = completion.choices[0].message.content.strip()
-        lines = [l.strip() for l in ai_text.split("\n") if "|" in l]
-
-        items = []
-        total_obj = None
-
-        def to_int(t):
-            m = re.search(r"-?\d+", t)
-            return int(m.group(0)) if m else 0
-
-        for line in lines:
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) != 6:
-                continue
-
-            food, serving, cal, prot, carb, fat = parts
-            entry = {
-                "food": food,
-                "serving": serving,
-                "calories": to_int(cal),
-                "protein": to_int(prot),
-                "carbs": to_int(carb),
-                "fat": to_int(fat),
-            }
-
-            if food.lower() == "total":
-                total_obj = entry
-            else:
-                items.append(entry)
-
-        return jsonify({"items": items, "total": total_obj, "raw": ai_text})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ------------------------------------
-# PROSTSZY ENDPOINT DLA APLIKACJI:
-# /scan-image -> jeden główny produkt
-# ------------------------------------
-@app.route("/scan-image", methods=["POST"])
-def scan_image_single():
-    try:
-        data = request.get_json(force=True)
-        image_b64 = data.get("image")
-
-        if not image_b64:
-            return jsonify({"error": "No image provided"}), 400
-
-        # użyjemy tej samej logiki co /analyze
-        system_prompt = """
-        You are a professional nutrition analyst.
-
-        Identify ALL visible food items on the plate (up to 6 different items).
-        Then choose the SINGLE most dominant / central food item.
-
-        Respond in EXACTLY this format, with ONLY ONE line (no TOTAL line):
-
-        food | serving g/ml | calories | protein | carbs | fat
-        """
-
-        completion = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this meal and pick main food."},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_b64}"
-                            },
-                        },
-                    ],
-                },
-            ],
-            temperature=0.1,
-            max_completion_tokens=128,
-        )
-
-        ai_text = completion.choices[0].message.content.strip()
-
-        # spodziewamy się jednej linii
-        line = ai_text.strip()
-        if "|" not in line:
-            return jsonify({"error": "Bad AI format", "raw": ai_text}), 500
-
+    for line in lines:
         parts = [p.strip() for p in line.split("|")]
         if len(parts) != 6:
-            return jsonify({"error": "Bad AI format", "raw": ai_text}), 500
+            continue
 
         food, serving, cal, prot, carb, fat = parts
-
-        grams = parse_int_from_str(serving, 100)
-
-        def to_int(t):
-            m = re.search(r"-?\d+", t)
-            return int(m.group(0)) if m else 0
-
-        nutrition = {
-            "calories": to_int(cal),
-            "protein": to_int(prot),
-            "carbs": to_int(carb),
-            "fat": to_int(fat),
-            # mikro = 0 – aplikacja i tak ma fallback z lokalnego JSON
-            "fiber": 0,
-            "sugars": 0,
-            "vitamin_a": 0,
-            "vitamin_c": 0,
-            "vitamin_k": 0,
-            "vitamin_e": 0,
-            "vitamin_b6": 0,
-            "omega3": 0,
-            "sodium": 0,
-            "potassium": 0,
-            "iron": 0,
-            "calcium": 0,
-            "magnesium": 0,
+        entry = {
+            "food": food,
+            "serving": serving,
+            "calories": _to_int(cal),
+            "protein": _to_int(prot),
+            "carbs": _to_int(carb),
+            "fat": _to_int(fat),
+            "grams": _extract_grams(serving),
         }
 
-        return jsonify(
-            {
-                "name": food,
-                "grams": grams,
-                "nutrition": nutrition,
-                "serving_text": serving,
-                "raw": ai_text,
-            }
-        )
+        if food.lower().startswith("total"):
+            total_obj = entry
+        else:
+            items.append(entry)
+
+    main_item = None
+    if items:
+        # choose item with highest calories as "main"
+        main_item = max(items, key=lambda x: x["calories"])
+
+    response = {
+        "items": items,
+        "total": total_obj,
+        "raw": ai_text,
+    }
+
+    if main_item:
+        response["name"] = main_item["food"]
+        response["grams"] = main_item["grams"]
+        response["nutrition"] = {
+            "calories": main_item["calories"],
+            "protein": main_item["protein"],
+            "carbs": main_item["carbs"],
+            "fat": main_item["fat"],
+        }
+
+    return response
+
+
+@app.route("/analyze", methods=["POST"])
+@app.route("/scan-image", methods=["POST"])  # alias for the app
+def analyze_image():
+    try:
+        data = request.get_json(force=True) or {}
+        image_b64 = data.get("image")
+        if not image_b64:
+            return jsonify({"error": "No image provided"}), 400
+
+        result = _analyze_image_from_b64(image_b64)
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -294,7 +205,7 @@ def scan_image_single():
 # ------------------------------------
 @app.route("/save_meal", methods=["POST"])
 def save_meal():
-    data = request.json
+    data = request.json or {}
     user_id = data.get("user_id")
     items = data.get("items")
     total = data.get("total")
@@ -310,7 +221,7 @@ def save_meal():
         "timestamp": timestamp,
     }
 
-    with open("meals.json", "a") as f:
+    with open("meals.json", "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
     return jsonify({"status": "ok"})
@@ -324,21 +235,24 @@ USERS_FILE = "users.json"
 
 def load_users():
     if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
 def save_users(data):
-    with open(USERS_FILE, "w") as f:
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
 
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.json
+    data = request.json or {}
     email = data.get("email")
     password = data.get("password")
+
+    if not email or not password:
+        return jsonify({"error": "Missing email or password"}), 400
 
     users = load_users()
 
@@ -356,7 +270,7 @@ def register():
 
 @app.route("/login", methods=["POST"])
 def login_user():
-    data = request.json
+    data = request.json or {}
     email = data.get("email")
     password = data.get("password")
 
@@ -380,4 +294,3 @@ def home():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
