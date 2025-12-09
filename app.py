@@ -137,25 +137,22 @@ def analyze_image():
         """
 
         completion = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this meal."},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_b64}"
-                            },
-                        },
-                    ],
-                },
-            ],
-            temperature=0.1,
-            max_completion_tokens=256,
-        )
+    model="llama-3.2-vision-11b",
+    messages=[
+        {"role":"system", "content": system_prompt},
+        {
+            "role":"user",
+            "content": [
+                {"type": "text", "text": "Analyze this meal."},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_b64}"
+                }},
+            ]
+        }
+    ],
+    temperature=0.1,
+)
+
 
         ai_text = completion.choices[0].message.content.strip()
         lines = [l.strip() for l in ai_text.split("\n") if "|" in l]
@@ -383,3 +380,4 @@ def home():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
