@@ -14,9 +14,12 @@ from openai import OpenAI
 app = Flask(__name__)
 
 # -------------------------------------------------
-# OPENAI CLIENT (GPT-4o VISION)
+# OPENAI CLIENT (VISION)
 # -------------------------------------------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not set")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -------------------------------------------------
@@ -26,23 +29,16 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 def ping():
     return {"status": "alive"}, 200
 
-
 # -------------------------------------------------
-# BARCODE DATABASE (LOCAL FALLBACK)
+# BARCODE DATABASE
 # -------------------------------------------------
 BARCODE_DB = {
     "5000112637922": {
         "name": "Coke Zero (330ml)",
         "grams": 330,
         "nutrition": {"calories": 1, "protein": 0, "carbs": 0, "fat": 0},
-    },
-    "5000159484695": {
-        "name": "Monster Ultra (500ml)",
-        "grams": 500,
-        "nutrition": {"calories": 10, "protein": 0, "carbs": 2, "fat": 0},
-    },
+    }
 }
-
 
 @app.route("/barcode", methods=["GET", "POST"])
 def barcode_lookup():
@@ -56,16 +52,10 @@ def barcode_lookup():
     if not item:
         return jsonify({"error": "Barcode not found"}), 404
 
-    return jsonify({
-        "code": code,
-        "name": item["name"],
-        "grams": item["grams"],
-        "nutrition": item["nutrition"],
-    })
-
+    return jsonify(item)
 
 # -------------------------------------------------
-# IMAGE → AI ANALYSIS
+# IMAGE → AI
 # -------------------------------------------------
 SYSTEM_PROMPT = """
 You are a professional nutrition analyst.
@@ -96,7 +86,7 @@ Return JSON ONLY in this format:
 }
 """
 
-def _analyze_image(image_b64: str):
+def _analyze_image(image_b64):
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -118,11 +108,8 @@ def _analyze_image(image_b64: str):
         max_tokens=600,
     )
 
-    raw = response.choices[0].message.content.strip()
-    return json.loads(raw)
+    return json.loads(response.choices[0].message.content)
 
-
-@app.route("/analyze", methods=["POST"])
 @app.route("/scan-image", methods=["POST"])
 def analyze_image():
     try:
@@ -134,7 +121,6 @@ def analyze_image():
 
         result = _analyze_image(image_b64)
 
-        # Pick main item (highest calories)
         items = result.get("items", [])
         main = max(items, key=lambda x: x.get("calories", 0)) if items else None
 
@@ -159,83 +145,12 @@ def analyze_image():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 # -------------------------------------------------
-# SAVE MEAL (OPTIONAL)
+# ROOT
 # -------------------------------------------------
-@app.route("/save_meal", methods=["POST"])
-def save_meal():
-    data = request.json or {}
-    record = {
-        "user_id": data.get("user_id"),
-        "items": data.get("items"),
-        "total": data.get("total"),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-    with open("meals.json", "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-
-    return jsonify({"status": "ok"})
-
-
-# -------------------------------------------------
-# USER AUTH
-# -------------------------------------------------
-USERS_FILE = "users.json"
-
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=2)
-
-
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.json or {}
-    email = data.get("email")
-    password = data.get("password")
-
-    users = load_users()
-    if email in users:
-        return jsonify({"error": "Email exists"}), 400
-
-    users[email] = {
-        "user_id": str(uuid.uuid4()),
-        "password": generate_password_hash(password),
-    }
-    save_users(users)
-
-    return jsonify({"status": "ok", "user_id": users[email]["user_id"]})
-
-
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.json or {}
-    email = data.get("email")
-    password = data.get("password")
-
-    users = load_users()
-    if email not in users:
-        return jsonify({"error": "User not found"}), 400
-
-    if not check_password_hash(users[email]["password"], password):
-        return jsonify({"error": "Invalid password"}), 400
-
-    return jsonify({"status": "ok", "user_id": users[email]["user_id"]})
-
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
     return "WESIVIO API running"
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
