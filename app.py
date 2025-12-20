@@ -1,20 +1,13 @@
 from flask import Flask, request, jsonify
-import os
-import json
-import re
-import uuid
-import base64
+import os, json, uuid
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from openai import OpenAI
 
-# -------------------------------------------------
-# APP
-# -------------------------------------------------
 app = Flask(__name__)
 
 # -------------------------------------------------
-# OPENAI CLIENT (VISION)
+# OPENAI CLIENT
 # -------------------------------------------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -29,8 +22,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 def ping():
     return {"status": "alive"}, 200
 
+
 # -------------------------------------------------
-# BARCODE DATABASE
+# BARCODE DB (fallback)
 # -------------------------------------------------
 BARCODE_DB = {
     "5000112637922": {
@@ -44,84 +38,76 @@ BARCODE_DB = {
 def barcode_lookup():
     data = request.get_json(silent=True) or {}
     code = request.args.get("code") or data.get("barcode")
-
     if not code:
-        return jsonify({"error": "No barcode provided"}), 400
-
+        return jsonify({"error": "No barcode"}), 400
     item = BARCODE_DB.get(code)
     if not item:
-        return jsonify({"error": "Barcode not found"}), 404
-
+        return jsonify({"error": "Not found"}), 404
     return jsonify(item)
 
+
 # -------------------------------------------------
-# IMAGE → AI
+# IMAGE → AI ANALYSIS (STRICT JSON)
 # -------------------------------------------------
 SYSTEM_PROMPT = """
-You are a professional nutrition analyst.
+You are a nutrition expert.
 
 Analyze the food in the image.
-Detect ALL visible food items.
 
-Return JSON ONLY in this format:
+RULES:
+- Respond with JSON ONLY
+- No explanations
+- No markdown
+- No text outside JSON
 
+Schema:
 {
   "items": [
-    {
-      "food": "name",
-      "grams": number,
-      "calories": number,
-      "protein": number,
-      "carbs": number,
-      "fat": number
-    }
+    {"food": "", "grams": 0, "calories": 0, "protein": 0, "carbs": 0, "fat": 0}
   ],
-  "total": {
-    "grams": number,
-    "calories": number,
-    "protein": number,
-    "carbs": number,
-    "fat": number
-  }
+  "total": {"grams": 0, "calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 }
 """
 
-def _analyze_image(image_b64):
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+def analyze_image_openai(image_b64: str):
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Analyze this food image."},
+                    {"type": "input_text", "text": SYSTEM_PROMPT},
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}"
-                        },
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{image_b64}",
                     },
                 ],
-            },
+            }
         ],
-        temperature=0.1,
-        max_tokens=600,
+        max_output_tokens=600,
     )
 
-    return json.loads(response.choices[0].message.content)
+    raw = response.output_text.strip()
+
+    # 🔥 HARD SAFETY
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        raise ValueError(f"AI returned invalid JSON:\n{raw}") from e
+
 
 @app.route("/scan-image", methods=["POST"])
-def analyze_image():
+@app.route("/analyze", methods=["POST"])
+def scan_image():
     try:
         data = request.get_json(force=True)
-        image_b64 = data.get("image")
+        image = data.get("image")
+        if not image:
+            return jsonify({"error": "No image"}), 400
 
-        if not image_b64:
-            return jsonify({"error": "No image provided"}), 400
-
-        result = _analyze_image(image_b64)
-
+        result = analyze_image_openai(image)
         items = result.get("items", [])
+
         main = max(items, key=lambda x: x.get("calories", 0)) if items else None
 
         response = {
@@ -131,26 +117,30 @@ def analyze_image():
         }
 
         if main:
-            response["name"] = main["food"]
-            response["grams"] = main["grams"]
-            response["nutrition"] = {
-                "calories": main["calories"],
-                "protein": main["protein"],
-                "carbs": main["carbs"],
-                "fat": main["fat"],
-            }
+            response.update({
+                "name": main["food"],
+                "grams": main["grams"],
+                "nutrition": {
+                    "calories": main["calories"],
+                    "protein": main["protein"],
+                    "carbs": main["carbs"],
+                    "fat": main["fat"],
+                },
+            })
 
         return jsonify(response)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # -------------------------------------------------
 # ROOT
 # -------------------------------------------------
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return "WESIVIO API running"
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
