@@ -3,19 +3,24 @@ import os
 import json
 import re
 import uuid
+import base64
+from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
-from groq import Groq
+from openai import OpenAI
 
+# -------------------------------------------------
+# APP
+# -------------------------------------------------
 app = Flask(__name__)
 
 # -------------------------------------------------
-# GROQ CLIENT
+# OPENAI CLIENT (GPT-4o VISION)
 # -------------------------------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -------------------------------------------------
-# HEALTH CHECK (USED BY FLUTTER)
+# HEALTH CHECK
 # -------------------------------------------------
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -23,7 +28,7 @@ def ping():
 
 
 # -------------------------------------------------
-# SIMPLE BARCODE DATABASE
+# BARCODE DATABASE (LOCAL FALLBACK)
 # -------------------------------------------------
 BARCODE_DB = {
     "5000112637922": {
@@ -38,15 +43,11 @@ BARCODE_DB = {
     },
 }
 
+
 @app.route("/barcode", methods=["GET", "POST"])
 def barcode_lookup():
-    code = None
-
-    if request.method == "GET":
-        code = request.args.get("code")
-    else:
-        data = request.get_json(force=True) or {}
-        code = data.get("barcode")
+    data = request.get_json(silent=True) or {}
+    code = request.args.get("code") or data.get("barcode")
 
     if not code:
         return jsonify({"error": "No barcode provided"}), 400
@@ -64,40 +65,46 @@ def barcode_lookup():
 
 
 # -------------------------------------------------
-# AI IMAGE ANALYSIS
+# IMAGE → AI ANALYSIS
 # -------------------------------------------------
 SYSTEM_PROMPT = """
 You are a professional nutrition analyst.
 
-You receive a photo of a meal.
-Detect ALL visible food items and estimate nutrition.
+Analyze the food in the image.
+Detect ALL visible food items.
 
-Respond EXACTLY in this format, one item per line:
+Return JSON ONLY in this format:
 
-food | serving g/ml | calories | protein | carbs | fat
-
-End with:
-TOTAL | total g/ml | total_cal | total_protein | total_carbs | total_fat
+{
+  "items": [
+    {
+      "food": "name",
+      "grams": number,
+      "calories": number,
+      "protein": number,
+      "carbs": number,
+      "fat": number
+    }
+  ],
+  "total": {
+    "grams": number,
+    "calories": number,
+    "protein": number,
+    "carbs": number,
+    "fat": number
+  }
+}
 """
 
-def _to_int(text):
-    m = re.search(r"-?\d+", str(text))
-    return int(m.group(0)) if m else 0
-
-def _extract_grams(serving):
-    m = re.search(r"(\d+)\s*(g|gram|grams|ml)", serving, re.I)
-    return int(m.group(1)) if m else 100
-
-
-def analyze_image_b64(image_b64):
-    completion = client.chat.completions.create(
-        model="llama-3.2-vision-preview",  # ✅ VALID GROQ MODEL
+def _analyze_image(image_b64: str):
+    response = client.chat.completions.create(
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Analyze this meal."},
+                    {"type": "text", "text": "Analyze this food image."},
                     {
                         "type": "image_url",
                         "image_url": {
@@ -108,73 +115,68 @@ def analyze_image_b64(image_b64):
             },
         ],
         temperature=0.1,
-        max_completion_tokens=512,
+        max_tokens=600,
     )
 
-    raw = completion.choices[0].message.content.strip()
-    lines = [l for l in raw.split("\n") if "|" in l]
-
-    items = []
-    total = None
-
-    for line in lines:
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 6:
-            continue
-
-        food, serving, cal, prot, carb, fat = parts
-
-        entry = {
-            "food": food,
-            "serving": serving,
-            "grams": _extract_grams(serving),
-            "calories": _to_int(cal),
-            "protein": _to_int(prot),
-            "carbs": _to_int(carb),
-            "fat": _to_int(fat),
-        }
-
-        if food.lower().startswith("total"):
-            total = entry
-        else:
-            items.append(entry)
-
-    main_item = max(items, key=lambda x: x["calories"]) if items else None
-
-    response = {
-        "items": items,
-        "total": total,
-        "raw": raw,
-    }
-
-    if main_item:
-        response["name"] = main_item["food"]
-        response["grams"] = main_item["grams"]
-        response["nutrition"] = {
-            "calories": main_item["calories"],
-            "protein": main_item["protein"],
-            "carbs": main_item["carbs"],
-            "fat": main_item["fat"],
-        }
-
-    return response
+    raw = response.choices[0].message.content.strip()
+    return json.loads(raw)
 
 
 @app.route("/analyze", methods=["POST"])
 @app.route("/scan-image", methods=["POST"])
 def analyze_image():
     try:
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True)
         image_b64 = data.get("image")
 
         if not image_b64:
             return jsonify({"error": "No image provided"}), 400
 
-        result = analyze_image_b64(image_b64)
-        return jsonify(result)
+        result = _analyze_image(image_b64)
+
+        # Pick main item (highest calories)
+        items = result.get("items", [])
+        main = max(items, key=lambda x: x.get("calories", 0)) if items else None
+
+        response = {
+            "items": items,
+            "total": result.get("total"),
+            "raw": result,
+        }
+
+        if main:
+            response["name"] = main["food"]
+            response["grams"] = main["grams"]
+            response["nutrition"] = {
+                "calories": main["calories"],
+                "protein": main["protein"],
+                "carbs": main["carbs"],
+                "fat": main["fat"],
+            }
+
+        return jsonify(response)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# -------------------------------------------------
+# SAVE MEAL (OPTIONAL)
+# -------------------------------------------------
+@app.route("/save_meal", methods=["POST"])
+def save_meal():
+    data = request.json or {}
+    record = {
+        "user_id": data.get("user_id"),
+        "items": data.get("items"),
+        "total": data.get("total"),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    with open("meals.json", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+    return jsonify({"status": "ok"})
 
 
 # -------------------------------------------------
@@ -182,15 +184,18 @@ def analyze_image():
 # -------------------------------------------------
 USERS_FILE = "users.json"
 
+
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
             return json.load(f)
     return {}
 
-def save_users(data):
+
+def save_users(users):
     with open(USERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(users, f, indent=2)
+
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -198,21 +203,18 @@ def register():
     email = data.get("email")
     password = data.get("password")
 
-    if not email or not password:
-        return jsonify({"error": "Missing email or password"}), 400
-
     users = load_users()
     if email in users:
-        return jsonify({"error": "Email already exists"}), 400
+        return jsonify({"error": "Email exists"}), 400
 
-    user_id = str(uuid.uuid4())
     users[email] = {
-        "user_id": user_id,
+        "user_id": str(uuid.uuid4()),
         "password": generate_password_hash(password),
     }
-
     save_users(users)
-    return jsonify({"status": "ok", "user_id": user_id})
+
+    return jsonify({"status": "ok", "user_id": users[email]["user_id"]})
+
 
 @app.route("/login", methods=["POST"])
 def login():
@@ -225,17 +227,14 @@ def login():
         return jsonify({"error": "User not found"}), 400
 
     if not check_password_hash(users[email]["password"], password):
-        return jsonify({"error": "Incorrect password"}), 400
+        return jsonify({"error": "Invalid password"}), 400
 
     return jsonify({"status": "ok", "user_id": users[email]["user_id"]})
 
 
-# -------------------------------------------------
-# ROOT
-# -------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
-    return "WESIVIO API running."
+    return "WESIVIO API running"
 
 
 if __name__ == "__main__":
